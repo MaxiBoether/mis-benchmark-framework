@@ -1,0 +1,11 @@
+name: intel_treesearch
+channels:
+  - anaconda
+  - conda-forge
+dependencies:
+  - python=3.8
+  - tensorflow-gpu
+  - cudatoolkit=10.0
+  - numpy
+  - scipy
+  - networkx

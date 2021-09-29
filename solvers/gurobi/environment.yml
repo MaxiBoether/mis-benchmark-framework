@@ -1,0 +1,12 @@
+name: gurobi
+channels:
+  - conda-forge
+  - gurobi
+dependencies:
+  - python=3.8
+  - logzero
+  - pulp
+  - networkx
+  - numpy
+  - pandas
+  - gurobi

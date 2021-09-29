@@ -1,0 +1,762 @@
+diff --git a/data/graph_dataset.py b/data/graph_dataset.py
+index 2e70179..5857f7b 100644
+--- a/data/graph_dataset.py
++++ b/data/graph_dataset.py
+@@ -3,7 +3,7 @@ import random
+ import math
+ from dgl import DGLGraph
+ from torch.utils.data import Dataset
+-from data.util import read_dgl_from_metis
++from data.util import read_dgl_from_graph
+ 
+ def generate_er_graph(n, p):
+     G = DGLGraph()
+@@ -36,11 +36,12 @@ class GraphDataset(Dataset):
+         ):            
+         self.data_dir = data_dir
+         self.generate_fn = generate_fn
++        self.graph_paths = sorted(list(self.data_dir.rglob("*.graph")))
+         if data_dir is not None:
+             self.num_graphs = len([
+                 name 
+                 for name in os.listdir(data_dir)
+-                if name.endswith('.METIS')
++                if name.endswith('.graph')
+                 ])
+         elif generate_fn is not None:
+             self.num_graphs = 5000 # sufficiently large number for moving average
+@@ -49,11 +50,7 @@ class GraphDataset(Dataset):
+ 
+     def __getitem__(self, idx):
+         if self.generate_fn is None:
+-            g_path = os.path.join(
+-                self.data_dir, 
+-                "{:06d}.METIS".format(idx)
+-                )
+-            g = read_dgl_from_metis(g_path)
++            g = read_dgl_from_graph(self.graph_paths[idx])
+         else:
+             g = self.generate_fn()
+ 
+diff --git a/data/util.py b/data/util.py
+index e25ecca..3816634 100644
+--- a/data/util.py
++++ b/data/util.py
+@@ -2,6 +2,10 @@ import networkx as nx
+ import dgl
+ import json
+ 
++def read_dgl_from_graph(graph_path):
++    _g = nx.read_gpickle(graph_path)
++    return dgl.from_networkx(_g)
++
+ def read_dgl_from_metis(metis_path):
+     edges_set = set()
+     with open(metis_path, "r") as f:
+diff --git a/env.py b/env.py
+index c0148c5..7d62806 100644
+--- a/env.py
++++ b/env.py
+@@ -5,7 +5,6 @@ import dgl.function as fn
+ from copy import deepcopy as dc
+ import random
+ import time
+-from time import time
+ from torch.utils.data import DataLoader
+ 
+ class MaximumIndependentSetEnv(object):
+@@ -14,14 +13,23 @@ class MaximumIndependentSetEnv(object):
+         max_epi_t, 
+         max_num_nodes, 
+         hamming_reward_coef, 
+-        device
++        device,
++        time_limit
+         ):
+         self.max_epi_t = max_epi_t
+         self.max_num_nodes = max_num_nodes
+         self.hamming_reward_coef = hamming_reward_coef
+         self.device = device
++        self.time_limit = time_limit
++        self.start_time = None
++
++        if self.time_limit is None:
++            print("disabled time limit for MIS, probably due to training instead of solving.")
+         
+     def step(self, action):
++        if self.time_limit is not None and self.start_time is None:
++            self.start_time = time.monotonic()
++            
+         reward, sol, done = self._take_action(action)
+         
+         ob = self._build_ob()
+@@ -56,6 +64,11 @@ class MaximumIndependentSetEnv(object):
+         # fill timeout with zeros
+         still_undecided = (self.x == 2)
+         timeout = (self.t == self.max_epi_t)
++
++        if self.time_limit is not None and self.start_time is not None and time.monotonic() - self.start_time > self.time_limit:
++            timeout = True
++            print("Time-based timeout! Setting all undecided vertices to 0.")
++
+         self.x[still_undecided & timeout] = 0
+ 
+         done = self._check_done()
+@@ -136,6 +149,9 @@ class MaximumIndependentSetEnv(object):
+             self.g.batch_size, 
+             num_samples, 
+             device = self.device
+-            )            
++            )
+             
+-        return ob
+\ No newline at end of file
++        if self.time_limit is not None:
++            self.start_time = time.monotonic()
++
++        return ob
+diff --git a/ppo/actor_critic.py b/ppo/actor_critic.py
+index 4a97756..7f2ba00 100644
+--- a/ppo/actor_critic.py
++++ b/ppo/actor_critic.py
+@@ -47,7 +47,7 @@ class ActorCritic(nn.Module):
+             h   
+             )
+ 
+-    def act(self, ob, g):
++    def act(self, ob, g, random=False):
+         num_nodes, batch_size = ob.size(0), ob.size(1)
+         
+         masks, idxs, subg, h = self.get_masks_idxs_subg_h(ob, g)
+@@ -64,24 +64,29 @@ class ActorCritic(nn.Module):
+             .view(-1, 3)
+             .index_select(0, flatten_subg_node_idxs)
+             )
+-        
++
++        if random:
++            min_elem = torch.min(logits)
++            max_elem = torch.max(logits)
++            logits = min_elem + torch.rand_like(logits) * (max_elem - min_elem)
++
+         # get actions
+         action = torch.zeros(
+             num_nodes * batch_size,
+-            dtype = torch.long, 
++            dtype = torch.long,
+             device = self.device
+-            )   
++            )
+         m = Categorical(
+             logits = logits.view(-1, logits.size(-1))
+             )
+-        action[flatten_node_idxs] = m.sample()        
++        action[flatten_node_idxs] = m.sample()
+         action = action.view(-1, batch_size)
+-        
++
+         return action
+ 
+     def act_and_crit(self, ob, g):
+         num_nodes, batch_size = ob.size(0), ob.size(1)
+-        
++
+         masks, idxs, subg, h = self.get_masks_idxs_subg_h(ob, g)
+         node_mask, subg_mask, subg_node_mask = masks
+         flatten_node_idxs, flatten_subg_idxs, flatten_subg_node_idxs = idxs
+@@ -89,7 +94,7 @@ class ActorCritic(nn.Module):
+         # compute logits to get action
+         logits = (
+             self.actor_net(
+-                h, 
++                h,
+                 subg,
+                 mask = subg_node_mask
+                 )
+@@ -101,11 +106,11 @@ class ActorCritic(nn.Module):
+         # get actions
+         action = torch.zeros(
+             num_nodes * batch_size,
+-            dtype = torch.long, 
++            dtype = torch.long,
+             device = self.device
+             )
+         action[flatten_node_idxs] = m.sample()
+-        
++
+         # compute log probability of actions per node
+         action_log_probs = torch.zeros(
+             num_nodes * batch_size,
+@@ -114,7 +119,7 @@ class ActorCritic(nn.Module):
+         action_log_probs[flatten_node_idxs] = m.log_prob(
+             action.index_select(0, flatten_node_idxs)
+             )
+-    
++
+         action = action.view(-1, batch_size)
+         action_log_probs = action_log_probs.view(-1, batch_size)
+         
+@@ -203,4 +208,4 @@ class ActorCritic(nn.Module):
+         
+     def _build_h(self, ob):
+         ob_t = ob.select(2, 1).unsqueeze(2)
+-        return torch.cat([ob_t, torch.ones_like(ob_t)], dim = 2)
+\ No newline at end of file
++        return torch.cat([ob_t, torch.ones_like(ob_t)], dim = 2)
+diff --git a/statistics.py b/statistics.py
+new file mode 100644
+index 0000000..897ded7
+--- /dev/null
++++ b/statistics.py
+@@ -0,0 +1,105 @@
++import json
++import time
++import numpy as np
++import os
++
++class GraphResultCollector():
++    def __init__(self, graph_name):
++        self.best_mis = None
++        self.best_mis_time = None
++        self.best_mis_size = 0
++        self.total_solutions = 0
++        self.results = {}
++        self.graph_name = os.path.splitext(os.path.basename(graph_name))[0]
++
++    def start_timer(self):
++        self.start_time = time.monotonic()
++
++    def start_process_timer(self):
++        self.process_start_time = time.process_time()
++
++    def collect_result(self, mis):
++        mis_len = np.ravel(mis).shape[0] 
++        if mis_len > self.best_mis_size:
++            self.best_mis_time = time.monotonic() - self.start_time
++            self.best_mis_process_time = time.process_time() - self.process_start_time
++            self.best_mis = mis
++            self.best_mis_size = mis_len
++
++    def stop_timer(self):
++        self.total_time = time.monotonic() - self.start_time
++
++    def finalize(self):
++        if self.best_mis is not None:
++            return {
++                "found_mis": True,
++                "vertices": self.best_mis_size,
++                "solution_time": self.best_mis_time,
++                "mis": np.ravel(self.best_mis).tolist(),
++                "total_time": self.total_time,
++                "solution_process_time": self.best_mis_process_time
++            }
++        else:
++            return {
++                "found_mis": False,
++                "total_solutions": self.total_solutions,
++                "total_time": self.total_time
++            }
++
++    def __add__(self, gcol):
++        if self.graph_name != gcol.graph_name:
++            raise Exception("Trying to merge two graph collectors of different graphs")
++        res = GraphResultCollector(self.graph_name)
++        res.total_time = max(self.total_time, gcol.total_time)
++           
++        if self.best_mis is None and gcol.best_mis is not None:
++            self.best_mis_size = -1
++       
++        if gcol.best_mis is None and self.best_mis is not None:
++            gcol.best_mis_size = -1
++
++        if gcol.best_mis is None and self.best_mis is None:
++            return res
++
++        if self.best_mis_size > gcol.best_mis_size:
++            res.best_mis = self.best_mis
++            res.best_mis_size = self.best_mis_size
++            res.best_mis_time = self.best_mis_time
++            res.best_mis_process_time = self.best_mis_process_time
++        else:
++            res.best_mis = gcol.best_mis
++            res.best_mis_size = gcol.best_mis_size
++            res.best_mis_time = gcol.best_mis_time
++            res.best_mis_process_time = gcol.best_mis_process_time
++
++        return res
++            
++
++class ResultCollector():
++    def __init__(self):
++        self.collectors = []
++        self.current_collector = None
++
++    def new_collector(self, graph_name):
++        if self.collectors:
++            self.current_collector.stop_timer()
++
++        g = GraphResultCollector(graph_name)
++        self.collectors += [g]
++        self.current_collector = g
++
++        return g
++    def finalize(self, out_path):
++        if self.current_collector:
++            self.current_collector.stop_timer()
++        results = {}
++        for g in self.collectors:
++            results[g.graph_name] = g.finalize()
++        self.dump(results, out_path)
++    def dump(self, results, out_path):
++        with open(out_path, 'w', encoding='utf-8') as f:
++            json.dump(results, f, ensure_ascii=False, sort_keys = True, indent=4)
++
++
++collector = ResultCollector()
++
+diff --git a/train_ppo.py b/train_ppo.py
+index cb84b8d..e1dbe33 100644
+--- a/train_ppo.py
++++ b/train_ppo.py
+@@ -4,8 +4,11 @@ import random
+ import numpy as np
+ import networkx as nx
+ import argparse
++from pathlib import Path
++from statistics import ResultCollector, GraphResultCollector
+ 
+-from time import time
++
++import time
+ from tqdm import tqdm
+ 
+ import torch
+@@ -16,30 +19,47 @@ from ppo.framework import ProxPolicyOptimFramework
+ from ppo.actor_critic import ActorCritic
+ from ppo.graph_net import PolicyGraphConvNet, ValueGraphConvNet
+ from ppo.storage import RolloutStorage
+-
+-from data.graph_dataset import get_er_15_20_dataset
+-from data.util import write_nx_to_metis
++from data.graph_dataset import GraphDataset
+ 
+ from env import MaximumIndependentSetEnv
+ 
+ parser = argparse.ArgumentParser()
+-parser.add_argument(
+-    "--data-dir", 
+-    help="directory to store validation and test datasets",
+-    type=str
+-    )
+-parser.add_argument(
+-    "--device",
+-    help="id of gpu device to use",
+-    type=int
+-    )
++parser.add_argument("operation", type=str, help="Operation to perform.", choices=["train", "solve"])
++parser.add_argument("input", type=Path, action="store", help="Directory containing input graphs (to be solved/trained on).")
++parser.add_argument("output", type=Path, action="store",  help="Folder in which the output (e.g. json containg statistics and solution will be stored, or trained weights)")
++
++parser.add_argument("--cuda_device", type=int, nargs="?", action="store", default=0, help="GPU device to use")
++parser.add_argument("--maximum_iterations_per_episode", type=int, nargs="?", action="store", default=32, help="Maximum iterations before the MDP timeouts.")
++parser.add_argument("--num_unrolling_iterations", type=int, nargs="?", action="store", default=32, help="Maximum number of unrolling iterations (how many stages we have per graph during training).")
++parser.add_argument("--num_environments_per_batch", type=int, nargs="?", action="store", default=32, help="Graph batch size during training")
++parser.add_argument("--gradient_step_batch_size", type=int, nargs="?", action="store", default=16, help="Batch size for gradient step")
++parser.add_argument("--gradient_steps_per_update", type=int, nargs="?", action="store", default=4, help="Number of gradient steps per update.")
++parser.add_argument("--diversity_reward_coefficient", type=float, nargs="?", action="store", default=0.1, help="Diversity reward coefficient.")
++parser.add_argument("--max_entropy_coefficient", type=float, nargs="?", action="store", default=0.1, help="Entropy coefficient.")
++parser.add_argument("--pretrained_weights", type=Path, nargs="?", action="store", help="Pre-trained weights to be used for solving/continuing training.")
++parser.add_argument("--num_samples", type=int, nargs="?", action="store", default=10, help="How many solutions to sample (default in the paper: training=2, inference=10)")
++parser.add_argument("--num_updates", type=int, nargs="?", action="store", default=20000, help="How many PPO updates to do")
++parser.add_argument("--time_limit", type=int, nargs="?", action="store", default=600, help="Time limit in seconds")
++parser.add_argument("--noise_as_prob_maps", action="store_true", default=False, help="Use uniform noise instead of GNN output.")
++parser.add_argument("--training_graph_idx", type=int, nargs="?", action="store", help="On which graph index to continue training.")
++parser.add_argument("--max_nodes", type=int, nargs="?", action="store", help="If you have lots of graphs, the determiniation of maximum number of nodes takes some time. If this value is given, you can force-overwrite it to save time.")
++
+ args = parser.parse_args()
+ 
+-device = torch.device(args.device)
+-base_data_dir = os.path.join(args.data_dir, "er_15_20")
++# Arguments: train/solve, input dir, output dir, cuda device, weights
++# Maximum iterations per episode => max_epi_t
++# Number of unrolling iteration => max_rollout_t
++# Number of environments per batch (graph instances) => rollout_batch_size
++# Batch size for gradient step => optim_batch_size
++# Number of gradient steps per update => optim_num_samples
++# Solution diversity reward coefficient => hamming_reward_coef
++# Maximum entropy coefficient => reg_coef
++
++device = torch.device(args.cuda_device)
++base_data_dir = os.path.join(args.input)
+ 
+ # env
+-hamming_reward_coef = 0.1
++hamming_reward_coef = args.diversity_reward_coefficient
+ 
+ # actor critic
+ num_layers = 4
+@@ -49,84 +69,56 @@ hidden_dim = 128
+ 
+ # optimization
+ init_lr = 1e-4
+-max_epi_t = 32
+-max_rollout_t = 32
+-max_update_t = 20000
++max_epi_t = args.maximum_iterations_per_episode
++max_rollout_t = args.num_unrolling_iterations
++max_update_t = args.num_updates
+ 
+ # ppo
+ gamma = 1.0
+ clip_value = 0.2
+-optim_num_samples = 4
++optim_num_samples = args.gradient_steps_per_update
+ critic_loss_coef = 0.5 
+-reg_coef = 0.1
++reg_coef = args.max_entropy_coefficient
+ max_grad_norm = 0.5
+ 
+ # logging
+ vali_freq = 5
+ log_freq = 1
+ 
+-# dataset specific
+-dataset = "synthetic"
+-graph_type = "er"
+-min_num_nodes = 15
+-max_num_nodes = 20
+-
+ # main
+-rollout_batch_size = 32
+-eval_batch_size = 1000
+-optim_batch_size = 16
++rollout_batch_size = args.num_environments_per_batch
++eval_batch_size = 1 # we don't batch for evaluation, to make it comparable to other solvers + because the way it is implemented by default makes it hard to match solutions to inputs.
++optim_batch_size = args.gradient_step_batch_size
+ init_anneal_ratio = 1.0
+ max_anneal_t = - 1
+ anneal_base = 0.
+-train_num_samples = 2
+-eval_num_samples = 10
++train_num_samples = args.num_samples
++eval_num_samples = args.num_samples
+ 
++print("Variables initialized.")
+ 
+ # initial values
+ best_vali_sol = -1e5
+ 
+-# generate and save datasets
+-num_eval_graphs = 1000
+-
+-for mode in ["vali", "test"]:
+-    # make folder for storing graphs
+-    data_dir = os.path.join(base_data_dir, mode)
+-    os.makedirs(data_dir, exist_ok = True)
+-    print("Generating {} dataset at {}...".format(mode, data_dir))
+-    for g_idx in tqdm(range(num_eval_graphs)):
+-        nx_g_path = os.path.join(data_dir, "{:06d}.METIS".format(g_idx))
+-
+-        # number of nodes in the graph is sampled uniformly at random
+-        num_nodes = random.randint(min_num_nodes, max_num_nodes)
+-
+-        # make an ER graph from the networkX package
+-        nx_g = nx.erdos_renyi_graph(num_nodes, p = 0.15)
+-
+-        # save the graph to METIS graph format
+-        write_nx_to_metis(nx_g, nx_g_path)
+-
+-# construct datasets
+-datasets = {
+-    "train": get_er_15_20_dataset("train"),
+-    "vali": get_er_15_20_dataset("vali", "/data/er_15_20/vali"),
+-    "test": get_er_15_20_dataset("test", "/data/er_15_20/test")
+-    }
+-
+ # construct data loaders
+ def collate_fn(graphs):
+     return dgl.batch(graphs)
+ 
++print("Initializing dataset...")
++dataset = GraphDataset(data_dir = args.input)
++print("Initializing data loaders.")
++
+ data_loaders = {
+     "train": DataLoader(
+-        datasets["train"],
++        dataset,
+         batch_size = rollout_batch_size,
+         shuffle = True,
+         collate_fn = collate_fn,
+         num_workers = 0,
+         drop_last = True
+         ),
+-    "vali": DataLoader(
+-        datasets["vali"],
++    "test": DataLoader(
++        dataset,
+         batch_size = eval_batch_size,
+         shuffle = False,
+         collate_fn = collate_fn,
+@@ -134,26 +126,38 @@ data_loaders = {
+         )
+         }
+ 
++if not args.max_nodes:
++    print("Determining maximum number of nodes over all graphs.")
++    max_num_nodes = -1
++    for g in data_loaders["test"]:
++        max_num_nodes = max(max_num_nodes, max(g.batch_num_nodes()))
++else:
++    print("Got maximum number of nodes from arguments!")
++    max_num_nodes = args.max_nodes
++
++print(f"Set max_num_nodes to {max_num_nodes}")
++
+ # construct environment
+ env = MaximumIndependentSetEnv(
+     max_epi_t = max_epi_t,
+     max_num_nodes = max_num_nodes,
+     hamming_reward_coef = hamming_reward_coef,
+-    device = device
++    device = device,
++    time_limit = args.time_limit if args.operation == "solve" else None
+     )
+  
+ # construct rollout storage
+ rollout = RolloutStorage(
+-    max_t = max_rollout_t, 
+-    batch_size = rollout_batch_size, 
++    max_t = max_rollout_t,
++    batch_size = rollout_batch_size,
+     num_samples = train_num_samples 
+     )
+ 
+ # construct actor critic network
+ actor_critic = ActorCritic(
+     actor_class = PolicyGraphConvNet,
+-    critic_class = ValueGraphConvNet, 
+-    max_num_nodes = max_num_nodes, 
++    critic_class = ValueGraphConvNet,
++    max_num_nodes = max_num_nodes,
+     hidden_dim = hidden_dim,
+     num_layers = num_layers,
+     device = device
+@@ -163,97 +167,151 @@ actor_critic = ActorCritic(
+ framework = ProxPolicyOptimFramework(
+     actor_critic = actor_critic,
+     init_lr = init_lr,
+-    clip_value = clip_value, 
++    clip_value = clip_value,
+     optim_num_samples = optim_num_samples,
+     optim_batch_size = optim_batch_size,
+     critic_loss_coef = critic_loss_coef, 
+     reg_coef = reg_coef, 
+     max_grad_norm = max_grad_norm, 
+     device = device
+-    )    
++    )
+ 
+ # define evaluate function
+-def evaluate(mode, actor_critic):
++def evaluate(actor_critic):
+     actor_critic.eval()
+     cum_cnt = 0
+     cum_eval_sol = 0.0
+-    for g in data_loaders[mode]:
++    results = ResultCollector()
++
++    for g_idx,g in enumerate(data_loaders["test"]):
++        g_name = dataset.graph_paths[g_idx]
++        print(f"Evaluating graph {g_name} (graph {g_idx + 1}/{len(dataset.graph_paths)})")
++        collector = results.new_collector(g_name)
++        collector.start_timer()
++        collector.start_process_timer()
++        assert g.batch_size == 1 # in our framework, needs to be 1
+         g.set_n_initializer(dgl.init.zero_initializer)
+         ob = env.register(g, num_samples = eval_num_samples)
+         while True:
+             with torch.no_grad():
+-                action = actor_critic.act(ob, g)
++                action = actor_critic.act(ob, g, random=args.noise_as_prob_maps)
+ 
+             ob, reward, done, info = env.step(action)
+             if torch.all(done).item():
+                 cum_eval_sol += info['sol'].max(dim = 1)[0].sum().cpu()
+                 cum_cnt += g.batch_size
++                # Fetch results - in this way it only works for unbatched graphs!
++                best_sol_idx = info["sol"].max(dim=1)[1].cpu().item()
++                best_sol_mis_size = info["sol"].max(dim=1)[0].cpu().item()
++                best_sol = env.x[:, best_sol_idx].cpu().detach().numpy()
++                
++                collector.collect_result(np.flatnonzero(best_sol))
++                collector.stop_timer()
++                print(f"Done! Found MIS of size {best_sol_mis_size}")
++
+                 break
+     
+     actor_critic.train()
+     avg_eval_sol = cum_eval_sol / cum_cnt
++    results.finalize(args.output / "results.json")
+ 
+     return avg_eval_sol
+ 
+-for update_t in range(max_update_t):
+-    if update_t == 0 or torch.all(done).item():
+-        try:
+-            g = next(train_data_iter)
+-        except:
+-            train_data_iter = iter(data_loaders["train"])
+-            g = next(train_data_iter)
+-        
+-        g.set_n_initializer(dgl.init.zero_initializer)
+-        ob = env.register(g, num_samples = train_num_samples)
+-        rollout.insert_ob_and_g(ob, g)
+-
+-    for step_t in range(max_rollout_t):
+-        # get action and value prediction
+-        with torch.no_grad():
+-            (action, 
+-            action_log_prob, 
+-            value_pred, 
+-            ) = actor_critic.act_and_crit(ob, g)
+-
+-        # step environments
+-        ob, reward, done, info = env.step(action)
+-
+-        # insert to rollout
+-        rollout.insert_tensors(
+-            ob, 
+-            action,
+-            action_log_prob, 
+-            value_pred, 
+-            reward, 
+-            done
+-            )
+-
+-        if torch.all(done).item():
+-            avg_sol = info['sol'].max(dim = 1)[0].mean().cpu()
+-            break
+-
+-    # compute gamma-decayed returns and corresponding advantages
+-    rollout.compute_rets_and_advantages(gamma)
+-
+-    # update actor critic model with ppo
+-    actor_loss, critic_loss, entropy_loss = framework.update(rollout)
++def train():
++    for update_t in range(max_update_t):
++        if update_t == 0 or torch.all(done).item():
++            try:
++                g = next(train_data_iter)
++                g_idx += 1
++            except:
++                train_data_iter = iter(data_loaders["train"])
++                g = next(train_data_iter)
++                g_idx = 0
++
++                if args.training_graph_idx:
++                    print(f"Continuing training at graph index {args.training_graph_idx}")
++                    while g_idx < args.training_graph_idx:
++                        g = next(train_data_iter)
++                        g_idx += 1
+             
+-    # log stats
+-    if (update_t + 1) % log_freq == 0:
+-        print("update_t: {:05d}".format(update_t + 1))
+-        print("train stats...")
+-        print(
+-            "sol: {:.4f}, "
+-            "actor_loss: {:.4f}, "
+-            "critic_loss: {:.4f}, "
+-            "entropy: {:.4f}".format(
+-                avg_sol,
+-                actor_loss.item(),
+-                critic_loss.item(),
+-                entropy_loss.item()
++            g.set_n_initializer(dgl.init.zero_initializer)
++            ob = env.register(g, num_samples = train_num_samples)
++            rollout.insert_ob_and_g(ob, g)
++
++        for step_t in range(max_rollout_t):
++            # get action and value prediction
++            with torch.no_grad():
++                (action, 
++                action_log_prob, 
++                value_pred, 
++                ) = actor_critic.act_and_crit(ob, g)
++
++            # step environments
++            ob, reward, done, info = env.step(action)
++
++            # insert to rollout
++            rollout.insert_tensors(
++                ob, 
++                action,
++                action_log_prob, 
++                value_pred, 
++                reward, 
++                done
++                )
++
++            if torch.all(done).item():
++                avg_sol = info['sol'].max(dim = 1)[0].mean().cpu()
++                break
++
++        # compute gamma-decayed returns and corresponding advantages
++        rollout.compute_rets_and_advantages(gamma)
++
++        # update actor critic model with ppo
++        actor_loss, critic_loss, entropy_loss = framework.update(rollout)
++                
++        # log stats
++        if (update_t + 1) % log_freq == 0:
++            print("update_t: {:05d}".format(update_t + 1))
++            print("train stats...")
++            print(
++                "sol: {:.4f}, "
++                "actor_loss: {:.4f}, "
++                "critic_loss: {:.4f}, "
++                "entropy: {:.4f}".format(
++                    avg_sol,
++                    actor_loss.item(),
++                    critic_loss.item(),
++                    entropy_loss.item()
++                    )
+                 )
+-            )
+-        if (update_t + 1) % vali_freq == 0:
+-            sol = evaluate("vali", actor_critic)
+-            print("vali stats...")
+-            print("sol: {:.4f}".format(sol.item()))
+\ No newline at end of file
++            print(f"current graph = {g_idx} (batch size = {g.batch_size})")    
++
++        if update_t % 300 == 0 or update_t == max_update_t:
++            print("saving intermediate results...")
++            torch.save(actor_critic.actor_net.state_dict(), args.output / f"{update_t}_{g_idx}_{time.monotonic()}_actornet.torch")
++            torch.save(actor_critic.critic_net.state_dict(), args.output / f"{update_t}_{g_idx}_{time.monotonic()}_criticnet.torch")
++
++            # validation not supported in our framework
++            #if (update_t + 1) % vali_freq == 0:
++            #    sol = evaluate("vali", actor_critic)
++            #    print("vali stats...")
++            #    print("sol: {:.4f}".format(sol.item()))
++
++    print("Training finished, writing state")
++    torch.save(actor_critic.actor_net.state_dict(), args.output / "actornet.torch")
++    torch.save(actor_critic.critic_net.state_dict(), args.output / "criticnet.torch")
++
++if args.pretrained_weights:
++    print("Loading pretrained weights")
++    actor_critic.actor_net.load_state_dict(torch.load(args.pretrained_weights / "actornet.torch"))
++    actor_critic.critic_net.load_state_dict(torch.load(args.pretrained_weights / "criticnet.torch"))
++    print("Weights loaded")
++
++if args.operation == "train":
++    print("Starting training")
++    train()
++    print("Training finished, exiting.")
++else:
++    print("Starting evaluation.")
++    res = evaluate(actor_critic)
++    print("Evaluation done.")

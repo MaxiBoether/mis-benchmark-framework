@@ -1,0 +1,14 @@
+name: dgl_treesearch
+channels:
+  - dglteam
+  - nvidia
+  - pytorch
+  - conda-forge
+dependencies:
+  - python=3.8
+  - cudatoolkit=11.1
+  - pytorch
+  - dgl-cuda11.1
+  - tqdm
+  - logzero
+  - requests
