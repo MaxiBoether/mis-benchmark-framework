@@ -1,3 +1,4 @@
+from re import split
 from data_generation.generator import DataGenerator
 from pathlib import Path
 
@@ -75,6 +76,31 @@ class RealWorldGraphGenerator(DataGenerator):
             return True
         return False
 
+    def handle_amazon(self, name, file_list, gen_labels):
+        if self.create_if_needed(name):
+            amzn_base = "https://mwis-vr-instances.s3.amazonaws.com/"
+
+            for graph_idx,file in enumerate(file_list):
+                file_url = amzn_base + file
+                with GraphDataset(file_url) as dsdir:
+                    df = pd.read_csv(dsdir / file.replace(".tar.gz", "") / "conflict_graph.txt", sep=" ", header=None, skiprows=1, names=["source", "target"])
+
+                    G = nx.from_pandas_edgelist(df)
+                    weight_mapping = { }
+                    with open(dsdir / file.replace(".tar.gz", "")  / "node_weights.txt", "r") as a_file:
+                        for line in a_file:
+                            stripped_line = line.strip()
+                            splitted = stripped_line.split()
+                            weight_mapping[int(splitted[0])] = int(splitted[1])
+
+                    nx.set_node_attributes(G, values = weight_mapping, name='weight')
+
+                    G = clean_nx_graph(G)
+                    G = self.maybe_label_graph(gen_labels, G, f"{name}-{graph_idx}")
+
+                    nx.write_gpickle(G, str(self.get_dataset_directory(name) / f"{name}-{graph_idx}.gpickle"))
+                    logger.info(f"Saved {name}-{graph_idx}. nodes={G.number_of_nodes()}, edges={G.number_of_edges()}")
+
     def handle_reddit(self, name, fullname, url, gen_labels):
         if self.create_if_needed(name):
             with GraphDataset(url) as dsdir:
@@ -123,9 +149,16 @@ class RealWorldGraphGenerator(DataGenerator):
         return G
 
     def generate(self, gen_labels = False,  weighted = False):
+    
         self.handle_reddit("reddit-b", "REDDIT-BINARY", "https://ls11-www.cs.tu-dortmund.de/people/morris/graphkerneldatasets/REDDIT-BINARY.zip", gen_labels)
         self.handle_reddit("reddit-5k", "REDDIT-MULTI-5K", "https://ls11-www.cs.tu-dortmund.de/people/morris/graphkerneldatasets/REDDIT-MULTI-5K.zip", gen_labels)
         self.handle_reddit("reddit-12k", "REDDIT-MULTI-12K", "https://ls11-www.cs.tu-dortmund.de/people/morris/graphkerneldatasets/REDDIT-MULTI-12K.zip", gen_labels)
+
+        self.handle_amazon("amazon-mt", ["MT-D-01.tar.gz", "MT-D-200.tar.gz", "MT-D-FN.tar.gz", "MT-W-01.tar.gz", "MT-W-200.tar.gz", "MT-W-FN.tar.gz"], gen_labels)
+        self.handle_amazon("amazon-mr", ["MR-D-01.tar.gz", "MR-D-03.tar.gz", "MR-D-05.tar.gz", "MR-D-FN.tar.gz", "MR-W-FN.tar.gz"], gen_labels)
+        self.handle_amazon("amazon-mw", ["MW-D-01.tar.gz", "MW-D-20.tar.gz", "MW-D-40.tar.gz", "MW-D-FN.tar.gz", "MW-W-01.tar.gz", "MW-W-05.tar.gz", "MW-W-10.tar.gz", "MW-W-FN.tar.gz"], gen_labels)
+        self.handle_amazon("amazon-cw", ["CW-T-C-1.tar.gz", "CW-T-C-2.tar.gz", "CW-T-D-4.tar.gz", "CW-T-D-6.tar.gz"], gen_labels)
+        self.handle_amazon("amazon-cr", ["CR-T-C-1.tar.gz", "CR-T-C-2.tar.gz", "CR-T-D-4.tar.gz", "CR-T-D-6.tar.gz", "CR-T-D-7.tar.gz"], gen_labels)
 
         if self.create_if_needed("as-caida"):
             with GraphDataset("https://snap.stanford.edu/data/as-caida.tar.gz") as dsdir:
@@ -287,3 +320,12 @@ class RealWorldGraphGenerator(DataGenerator):
                         nx.write_gpickle(G, str(self.get_dataset_directory("kexu-vc-benchmark") / f"kexu-vc-benchmark-{idx}.gpickle"))
                         logger.info(f"Saved kexu-vc-benchmark-{idx}. nodes={G.number_of_nodes()}, edges={G.number_of_edges()}")
                         idx += 1
+
+        if self.create_if_needed("dimacs"):
+            with GraphDataset(f"http://lcs.ios.ac.cn/~caisw/Resource/DIMACS complementary graphs.tar.gz", unpack=True) as dsdir:
+                for idx, graph_path in enumerate(dsdir.rglob("*.mis")):
+                    df = pd.read_csv(graph_path, sep=" ", header=None, skiprows=1, names=["p", "source", "target"])
+                    G = clean_nx_graph(nx.from_pandas_edgelist(df))
+                    G = self.maybe_label_graph(gen_labels, G, f"dimacs-{idx}")
+                    nx.write_gpickle(G, str(self.get_dataset_directory("dimacs") / f"dimacs-{idx}.gpickle"))
+                    logger.info(f"Saved dimacs-{idx}. nodes={G.number_of_nodes()}, edges={G.number_of_edges()}")

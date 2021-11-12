@@ -58,6 +58,10 @@ class Gurobi(MWISSolver):
         logger.info("Solving all given instances using " + str(self))
 
         weighted = "weighted" in parameters.keys()
+        quadratic = "quadratic" in parameters.keys()
+        write_mps = "write_mps" in parameters.keys()
+
+
         cache_directory = solve_data_path / "preprocessed" / str(self)
         self._prepare_instances(solve_data_path, cache_directory, weighted=weighted)
 
@@ -75,6 +79,19 @@ class Gurobi(MWISSolver):
 
         if weighted:
             arguments += ["--weighted"]
+
+        if quadratic:
+            arguments += ["--quadratic"]
+
+        if write_mps:
+            arguments += ["--write_mps"]
+
+        if "prm_file" in parameters.keys():
+            arguments += ["--prm_file", parameters["prm_file"]]
+
+        if weighted and quadratic:
+            logger.error("Cannot use weighted and quadratic program together!")
+            return
 
         logger.debug(f"Calling {script_file} with arguments {arguments}.")
         launch_python_script_in_conda_env(conda_env_name, conda_env_file, script_file, arguments)

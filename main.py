@@ -126,6 +126,15 @@ def _train_or_solve(args):
         if args.max_nodes:
             parameters["max_nodes"] = args.max_nodes
 
+        if args.quadratic:
+            parameters["quadratic"] = "yes"
+
+        if args.write_mps:
+            parameters["write_mps"] = "yes"
+
+        if args.prm_file:
+            parameters["prm_file"] = args.prm_file
+
         solver.solve(args.input_folder, args.output_folder, parameters)
     elif args.operation == "train":
         if args.cuda_devices:
@@ -293,6 +302,9 @@ if __name__ == "__main__":
     solve_parser.add_argument("--model_prob_maps", type=int, action="store", help="Treesearch (Intel/DGL) specific: Number of probability maps the model was/should be trained for.")
     solve_parser.add_argument("--maximum_iterations_per_episode", type=int, action="store", help="LwD specific: Maximum iterations before the MDP timeouts.")
     solve_parser.add_argument("--max_nodes", type=int, action="store", help="LwD specific: If you have lots of graphs, the determiniation of maximum number of nodes takes some time. If this value is given, you can force-overwrite it to save time.")
+    solve_parser.add_argument("--quadratic", action="store_true", default=False, help="Gurobi specific: Whether a quadratic program should be used instead of a linear program to solve the MIS problem (cannot be used together with weighted)")
+    solve_parser.add_argument("--write_mps", action="store_true", default=False, help="Gurobi specific: Instead of solving, write mps output (e.g., for tuning)")
+    solve_parser.add_argument("--prm_file", type=pathlib.Path, nargs="?", action="store", help="Gurboi specific: Gurobi parameter file (e.g. by grbtune).")
 
     solve_parser.add_argument("solver", type=str, help="Solver to use.", choices=["dgl-treesearch", "intel-treesearch", "gurobi", "kamis", "lwd"])
     solve_parser.add_argument("input_folder", type=pathlib.Path, action="store", help="Directory containing input")
