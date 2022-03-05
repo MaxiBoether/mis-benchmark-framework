@@ -25,7 +25,7 @@ If you use this in your work, please cite us (and the papers of the solvers that
 }
 ```
 
-If you have questions you are welcome to reach out to @MaxiBoether and @EightSQ.
+If you have questions you are welcome to reach out to [@MaxiBoether](https://github.com/MaxiBoether) and [@EightSQ](https://github.com/EightSQ).
 
 ## Contributions
 
