@@ -7,8 +7,8 @@ channels:
 dependencies:
   - python=3.8
   - cudatoolkit=11.1
-  - pytorch
-  - dgl-cuda11.1
-  - tqdm
-  - logzero
-  - requests
+  - pytorch=1.8.1
+  - dgl-cuda11.1=0.6.1
+  - tqdm=4.59.0
+  - logzero=1.7.0
+  - requests=2.25.1

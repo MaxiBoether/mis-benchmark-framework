@@ -4,9 +4,9 @@ channels:
   - gurobi
 dependencies:
   - python=3.8
-  - logzero
-  - pulp
-  - networkx
-  - numpy
-  - pandas
-  - gurobi
+  - logzero=1.7.0
+  - pulp=2.4
+  - networkx=2.5
+  - numpy=1.20.2
+  - pandas=1.2.3
+  - gurobi=9.1.1

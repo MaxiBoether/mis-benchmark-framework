@@ -4,8 +4,8 @@ channels:
   - conda-forge
 dependencies:
   - python=3.8
-  - tensorflow-gpu
+  - tensorflow-gpu=2.4.1
   - cudatoolkit=10.0
-  - numpy
-  - scipy
-  - networkx
+  - numpy=1.19.2
+  - scipy=1.6.2
+  - networkx=2.5
