@@ -6,17 +6,17 @@ channels:
   - anaconda
 dependencies:
   - python=3.8
-  - pytorch
-  - cpuonly
-  - dgl
-  - numpy
-  - scipy
-  - networkx
-  - logzero
-  - tqdm
-  - requests
-  - filelock
-  - osmnx
-  - pip
+  - pytorch=1.8.1
+  - cpuonly=1.0
+  - dglteam::dgl=0.6.1
+  - numpy=1.20.2
+  - scipy=1.6.2
+  - networkx=2.5
+  - logzero=1.7.0
+  - tqdm=4.59.0
+  - requests=2.25.1
+  - filelock=3.0.12
+  - osmnx=1.0.1
+  - pip=21.0.1
   - pip:
     - python-sat
